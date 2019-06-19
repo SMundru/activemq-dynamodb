@@ -1,0 +1,48 @@
+openapi: 3.0.0
+info:
+  description: sample api
+  version: 1.0.0
+  title: API
+paths:
+  /search-history/{user}/{site}:
+    post:
+      operationId: search
+      parameters:
+        - name: site
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: user
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: Term
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Search'
+
+      responses:
+        "200":
+          description: OK
+        "201":
+          description: Created
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+      deprecated: false
+
+components:
+  schemas:
+    Search:
+      type: object
+      properties:
+        term:
+          type: string
