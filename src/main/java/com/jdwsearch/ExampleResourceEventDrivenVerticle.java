@@ -3,12 +3,12 @@ package com.jdwsearch;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBAsync;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBAsyncClientBuilder;
-import com.amazonaws.services.dynamodbv2.document.*;
+import com.amazonaws.services.dynamodbv2.model.AttributeValue;
+import com.amazonaws.services.dynamodbv2.model.GetItemRequest;
+import com.amazonaws.services.dynamodbv2.model.GetItemResult;
 import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
-import com.amazonaws.util.CollectionUtils;
 import com.jdwsearch.infrastructure.Properties;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.api.validation.ValidationException;
 import io.vertx.reactivex.amqpbridge.AmqpBridge;
@@ -19,7 +19,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 
+import static com.amazonaws.util.ImmutableMapParameter.of;
 import static io.vertx.core.http.HttpHeaders.CONTENT_TYPE;
 import static org.apache.http.entity.ContentType.APPLICATION_JSON;
 import static org.apache.http.entity.ContentType.TEXT_PLAIN;
@@ -27,8 +31,8 @@ import static org.apache.http.entity.ContentType.TEXT_PLAIN;
 @Slf4j
 final class ExampleResourceEventDrivenVerticle extends AbstractEventDrivenVerticle {
 
-    private final static String API_SPECIFICATION_FILE_PATH = "src/main/resources/api/search.yaml";
-    private final static String OPERATION_ID = "search";
+    private static final String API_SPECIFICATION_FILE_PATH = "src/main/resources/api/search.yaml";
+    private static final String OPERATION_ID = "search";
 
     private final String queueName;
 
@@ -36,9 +40,9 @@ final class ExampleResourceEventDrivenVerticle extends AbstractEventDrivenVertic
 
     ExampleResourceEventDrivenVerticle(final Properties properties) {
         super(properties, API_SPECIFICATION_FILE_PATH);
-        queueName = properties.getQueue()
-                .getName();
-        this.client = AmazonDynamoDBAsyncClientBuilder.standard().withRegion(Regions.EU_WEST_2).build();
+        queueName = properties.getQueue().getName();
+        this.client =
+                AmazonDynamoDBAsyncClientBuilder.standard().withRegion(Regions.EU_WEST_2).build();
     }
 
     @Override
@@ -48,72 +52,107 @@ final class ExampleResourceEventDrivenVerticle extends AbstractEventDrivenVertic
 
         routerFactory.mountOperationToEventBus(OPERATION_ID, "search-history.post");
 
-        routerFactory.addHandlerByOperationId(OPERATION_ID, context -> {
-            final String user = context.request()
-                    .getParam("user");
+        routerFactory.addHandlerByOperationId(
+                OPERATION_ID,
+                context -> {
+                    final String user = context.request().getParam("user");
 
-            final String site = context.request()
-                    .getParam("site");
+                    final String site = context.request().getParam("site");
 
-            String term = context.getBodyAsJson().getString("term");
+                    String term = context.getBodyAsJson().getString("term");
 
-            JsonObject eventPayload = new JsonObject().put("body", new JsonObject().put("user", user).put("site", site).put("term", term));
-            producer.send(eventPayload);
+                    JsonObject eventPayload =
+                            new JsonObject()
+                                    .put(
+                                            "body",
+                                            new JsonObject()
+                                                    .put("user", user)
+                                                    .put("site", site)
+                                                    .put("term", term));
+                    producer.send(eventPayload);
 
-            context.response()
-                    .putHeader(CONTENT_TYPE, APPLICATION_JSON.getMimeType())
-                    .setStatusCode(HttpResponseStatus.CREATED.code())
-                    .end(new JsonObject().put("Success", true)
-                            .encode());
-        });
+                    context.response()
+                            .putHeader(CONTENT_TYPE, APPLICATION_JSON.getMimeType())
+                            .setStatusCode(HttpResponseStatus.CREATED.code())
+                            .end(new JsonObject().put("Success", true).encode());
+                });
 
-        routerFactory.addFailureHandlerByOperationId(OPERATION_ID, context -> {
-            Throwable failure = context.failure();
-            if (failure instanceof ValidationException) {
-                context.response()
-                        .putHeader(CONTENT_TYPE, TEXT_PLAIN.getMimeType())
-                        .setStatusCode(HttpResponseStatus.BAD_REQUEST.code())
-                        .end(failure.getMessage());
-            } else {
-                log.error("handling resource failed", failure);
+        routerFactory.addFailureHandlerByOperationId(
+                OPERATION_ID,
+                context -> {
+                    Throwable failure = context.failure();
+                    if (failure instanceof ValidationException) {
+                        context.response()
+                                .putHeader(CONTENT_TYPE, TEXT_PLAIN.getMimeType())
+                                .setStatusCode(HttpResponseStatus.BAD_REQUEST.code())
+                                .end(failure.getMessage());
+                    } else {
+                        log.error("handling resource failed", failure);
 
-                context.response()
-                        .putHeader(CONTENT_TYPE, TEXT_PLAIN.getMimeType())
-                        .setStatusCode(HttpResponseStatus.INTERNAL_SERVER_ERROR.code())
-                        .end(failure.getMessage());
-            }
-        });
+                        context.response()
+                                .putHeader(CONTENT_TYPE, TEXT_PLAIN.getMimeType())
+                                .setStatusCode(HttpResponseStatus.INTERNAL_SERVER_ERROR.code())
+                                .end(failure.getMessage());
+                    }
+                });
     }
 
     private void saveSearch(Message<JsonObject> message) {
         JsonObject body = message.body().getJsonObject("body");
         log.info("received message {}", body.encode());
 
-        PrimaryKey primaryKey = new PrimaryKey();
         String user = body.getString("user");
-        primaryKey.addComponent("User", user);
         String site = body.getString("site");
-        primaryKey.addComponent("Site", site);
-
-        Item item = new Item().withPrimaryKey(primaryKey);
-
         String term = body.getString("term");
-        DynamoDB dynamoDB = new DynamoDB(client);
-        Table searchHistory = dynamoDB.getTable("SearchHistory");
-        Item searchHistoryItem = searchHistory.getItem("User", user, "Site", site);
-        if (searchHistoryItem != null) {
-            List<Object> terms = searchHistoryItem.getList("Terms");
-            if (CollectionUtils.isNullOrEmpty(terms)) {
-                searchHistoryItem.withList("Terms", Collections.singletonList(term));
-            } else {
-                terms.add(term);
-                searchHistoryItem.withList("Terms", terms);
-            }
-        } else {
-            item.withList("Terms", Collections.singletonList(term));
-            searchHistoryItem = item;
-        }
-        searchHistory.putItem(searchHistoryItem);
-    }
 
+        GetItemRequest getItemRequest =
+                new GetItemRequest()
+                        .withTableName("SearchHistory")
+                        .withKey(
+                                of(
+                                        "User",
+                                        new AttributeValue(user),
+                                        "Site",
+                                        new AttributeValue(site)));
+
+        Future<GetItemResult> getItemResultFuture = client.getItemAsync(getItemRequest);
+        GetItemResult getItemResult = null;
+        try {
+            getItemResult = getItemResultFuture.get();
+        } catch (InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        }
+
+        PutItemRequest putItemRequest = new PutItemRequest().withTableName("SearchHistory");
+
+        if (getItemResult != null) {
+            Map<String, AttributeValue> resultItem = getItemResult.getItem();
+            if (resultItem != null && !resultItem.isEmpty()) {
+                AttributeValue termsValue = resultItem.get("Terms");
+                if (termsValue == null) {
+                    resultItem.put(
+                            "Terms", new AttributeValue().withSS(Collections.singletonList(term)));
+                    putItemRequest.withItem(resultItem);
+                } else {
+                    List<String> terms = termsValue.getSS();
+                    terms.add(term);
+                    getItemResult.getItem().get("Terms").setSS(terms);
+                    putItemRequest.setItem(getItemResult.getItem());
+                }
+            }
+        }
+
+        if (putItemRequest.getItem() == null || putItemRequest.getItem().isEmpty()) {
+            putItemRequest.withItem(
+                    of(
+                            "User",
+                            new AttributeValue(user),
+                            "Site",
+                            new AttributeValue(site),
+                            "Terms",
+                            new AttributeValue(Collections.singletonList(term))));
+        }
+
+        client.putItemAsync(putItemRequest);
+    }
 }
